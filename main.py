@@ -272,7 +272,6 @@ def process_account(
                 # Ensure Chrome flushes cookies to its profile on disk BEFORE closing (No force-kill)
                 profile_path = browser_manager.get_profile_path(account.email)
                 if profile_path and driver:
-                    print(f"[*] Ensuring cookies are saved to profile on disk: {profile_path.name}")
                     flushed = browser_manager.flush_and_close(profile_path)
                     if flushed:
                         print(f"[OK] Authentication cookies verified on disk in profile: {account.email}")

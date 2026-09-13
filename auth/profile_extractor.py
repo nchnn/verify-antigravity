@@ -294,7 +294,7 @@ class ProfileCookieExtractor:
                 )
                 return None
 
-            logger.info(
+            logger.debug(
                 f"[ProfileExtractor] Decrypted {len(cookie_dict)} cookies "
                 f"({', '.join(k for k in PRIMARY_AUTH_COOKIES if k in cookie_dict)})"
             )

@@ -131,13 +131,24 @@ class BrowserManager:
         """Initializes and returns an undetected Chrome WebDriver instance."""
         options = uc.ChromeOptions()
         
+        chrome_ver = self._detect_chrome_version()
+        user_agent = (
+            f"Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            f"AppleWebKit/537.36 (KHTML, like Gecko) "
+            f"Chrome/{chrome_ver}.0.0.0 Safari/537.36"
+        )
+        options.add_argument(f"--user-agent={user_agent}")
+
         if self.headless:
             options.add_argument("--headless=new")
+            options.add_argument("--disable-blink-features=AutomationControlled")
+            options.add_argument("--window-size=1920,1080")
+        else:
+            options.add_argument("--window-size=1280,900")
 
         # Essential stealth & performance arguments
         options.add_argument("--no-sandbox")
         options.add_argument("--disable-dev-shm-usage")
-        options.add_argument("--window-size=1280,900")
         options.add_argument("--disable-notifications")
         options.add_argument("--disable-popup-blocking")
         options.add_argument("--lang=en-US")
@@ -153,8 +164,7 @@ class BrowserManager:
             if profile_path:
                 self._release_profile_lock(profile_path)
 
-        chrome_ver = self._detect_chrome_version()
-        logger.info(f"Launching Chrome (v{chrome_ver}) for: {account_email or 'anonymous'}")
+        logger.info(f"Launching Chrome (v{chrome_ver}, headless={self.headless}) for: {account_email or 'anonymous'}")
         
         try:
             self.driver = uc.Chrome(
@@ -165,10 +175,61 @@ class BrowserManager:
             )
             self.driver.set_page_load_timeout(self.settings.page_timeout_seconds)
             self.driver.implicitly_wait(10)
+
+            if self.headless:
+                self._apply_headless_evasions(user_agent, chrome_ver)
+
             return self.driver
         except Exception as e:
             logger.error(f"Failed to launch Chrome driver: {e}")
             raise
+
+    def _apply_headless_evasions(self, user_agent: str, chrome_ver: int):
+        """Overrides CDP User-Agent metadata, client hints, and screen dimensions to bypass headless detection."""
+        try:
+            self.driver.execute_cdp_cmd(
+                "Network.setUserAgentOverride",
+                {
+                    "userAgent": user_agent,
+                    "platform": "Win32",
+                    "acceptLanguage": "en-US,en;q=0.9",
+                    "userAgentMetadata": {
+                        "brands": [
+                            {"brand": "Chromium", "version": str(chrome_ver)},
+                            {"brand": "Google Chrome", "version": str(chrome_ver)},
+                            {"brand": "Not=A?Brand", "version": "24"},
+                        ],
+                        "fullVersionList": [
+                            {"brand": "Chromium", "version": f"{chrome_ver}.0.0.0"},
+                            {"brand": "Google Chrome", "version": f"{chrome_ver}.0.0.0"},
+                            {"brand": "Not=A?Brand", "version": "24.0.0.0"},
+                        ],
+                        "fullVersion": f"{chrome_ver}.0.0.0",
+                        "platform": "Windows",
+                        "platformVersion": "10.0.0",
+                        "architecture": "x86",
+                        "model": "",
+                        "mobile": False,
+                        "bitness": "64",
+                        "wow64": False,
+                    },
+                },
+            )
+            self.driver.execute_cdp_cmd(
+                "Page.addScriptToEvaluateOnNewDocument",
+                {
+                    "source": """
+                        Object.defineProperty(screen, 'width', { get: () => 1920 });
+                        Object.defineProperty(screen, 'height', { get: () => 1080 });
+                        Object.defineProperty(screen, 'availWidth', { get: () => 1920 });
+                        Object.defineProperty(screen, 'availHeight', { get: () => 1040 });
+                        Object.defineProperty(screen, 'colorDepth', { get: () => 24 });
+                        Object.defineProperty(screen, 'pixelDepth', { get: () => 24 });
+                    """
+                },
+            )
+        except Exception as e:
+            logger.debug(f"Headless evasions notice: {e}")
 
     def _wait_for_sqlite_flush(self, profile_path: Path, timeout: float = 12.0) -> bool:
         """
@@ -185,7 +246,7 @@ class BrowserManager:
                 cookies = pe.extract_cookies()
                 if cookies and (cookies.get("SAPISID") or cookies.get("SID")):
                     elapsed = time.time() - start
-                    logger.info(
+                    logger.debug(
                         f"[OK] Profile cookies confirmed on disk in SQLite ({len(cookies)} cookies, {elapsed:.2f}s): {profile_path.name}"
                     )
                     return True
@@ -202,7 +263,7 @@ class BrowserManager:
                 count = conn.execute("SELECT count(*) FROM cookies").fetchone()[0]
                 conn.close()
                 if count > 0:
-                    logger.info(f"[OK] SQLite database flushed with {count} rows on disk: {profile_path.name}")
+                    logger.debug(f"[OK] SQLite database flushed with {count} rows on disk: {profile_path.name}")
                     return True
             except Exception:
                 pass
@@ -225,7 +286,7 @@ class BrowserManager:
         # 1. Instruct Chrome via CDP to close gracefully — triggers NetworkService SQLite commit
         try:
             self.driver.execute_cdp_cmd("Browser.close", {})
-            logger.info("[*] Sent graceful close signal via CDP; waiting for cookie flush to disk...")
+            logger.debug("[*] Sent graceful close signal via CDP; waiting for cookie flush to disk...")
         except Exception as e:
             logger.debug(f"Browser.close CDP signal notice: {e}")
 

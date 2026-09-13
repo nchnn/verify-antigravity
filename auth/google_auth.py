@@ -240,6 +240,13 @@ class GoogleAuthVerifier:
             if "couldn't find your google account" in current_src or "enter a valid email" in current_src:
                 return VerificationStatus.INVALID_CREDENTIALS, "Google account not found"
 
+            # Check for Google security rejection ("This browser or app may not be secure")
+            if self._is_security_rejection_present():
+                return (
+                    VerificationStatus.ERROR,
+                    "Google blocked sign-in ('This browser or app may not be secure' - headless/automation detected)",
+                )
+
             # Check if Google presented 'Confirm you're not a robot' immediately after email
             if self._is_bot_challenge_present():
                 resolved = self._wait_for_bot_challenge_resolution(account.email)
@@ -253,13 +260,19 @@ class GoogleAuthVerifier:
             password_entered = self._enter_password(account.password)
             if not password_entered:
                 self._ensure_active_window()
+                # Check if blocked by security rejection
+                if self._is_security_rejection_present():
+                    return (
+                        VerificationStatus.ERROR,
+                        "Google blocked sign-in ('This browser or app may not be secure' - headless/automation detected)",
+                    )
                 # Check if password field was blocked by 'Confirm you're not a robot'
                 if self._is_bot_challenge_present():
                     resolved = self._wait_for_bot_challenge_resolution(account.email)
                     if resolved:
                         password_entered = self._enter_password(account.password)
                         if not password_entered:
-                            if "myaccount.google.com" in self.driver.current_url:
+                            if "myaccount.google.com" in self.driver.current_url or "gds.google.com" in self.driver.current_url:
                                 return VerificationStatus.SUCCESS_VERIFIED, "Session already active"
                             return VerificationStatus.ERROR, "Password input field not encountered after robot challenge"
                     else:
@@ -267,7 +280,7 @@ class GoogleAuthVerifier:
                             VerificationStatus.CHALLENGE_REQUIRED,
                             "Robot verification challenge ('Confirm you're not a robot') timed out",
                         )
-                elif "myaccount.google.com" in self.driver.current_url:
+                elif "myaccount.google.com" in self.driver.current_url or "gds.google.com" in self.driver.current_url:
                     return VerificationStatus.SUCCESS_VERIFIED, "Session already active"
                 else:
                     return VerificationStatus.ERROR, "Password input field not encountered"
@@ -337,6 +350,24 @@ class GoogleAuthVerifier:
         except Exception:
             return False
 
+    def _is_security_rejection_present(self) -> bool:
+        """Detects whether Google blocked the sign-in with 'This browser or app may not be secure'."""
+        try:
+            url = self._current_url()
+            src = self._page_source()
+
+            if "signin/rejected" in url or "/rejected" in url:
+                return True
+
+            reject_phrases = [
+                "this browser or app may not be secure",
+                "couldn't sign you in",
+                "try using a different browser",
+            ]
+            return any(phrase in src for phrase in reject_phrases)
+        except Exception:
+            return False
+
     def _is_bot_challenge_present(self) -> bool:
         """Detects whether Google has presented a 'Confirm you're not a robot' or reCAPTCHA screen."""
         try:
@@ -370,6 +401,14 @@ class GoogleAuthVerifier:
         of the 'Confirm you're not a robot' (reCAPTCHA) challenge in Chrome.
         Actively monitors for page navigation or resolution.
         """
+        if self.settings.browser_headless:
+            logger.error(
+                f"[HEADLESS CAPTCHA] 'Confirm you're not a robot' triggered for {account_email} in headless mode. "
+                f"Headless mode cannot solve on-screen CAPTCHAs interactively. "
+                f"Please run with headed mode (set BROWSER_HEADLESS=false in .env or run without --headless) to solve."
+            )
+            return False
+
         wait_seconds = timeout or self.settings.challenge_timeout_seconds
 
         logger.warning(
@@ -408,7 +447,7 @@ class GoogleAuthVerifier:
                 pass
 
             # 3. Check if session already authenticated
-            if any(marker in current_url for marker in ["myaccount.google.com", "antigravity.google", "checkcookie"]):
+            if any(marker in current_url for marker in ["myaccount.google.com", "antigravity.google", "checkcookie", "gds.google.com"]):
                 logger.info(f"[OK] Robot challenge resolved: Authenticated session detected for {account_email}.")
                 return True
 
@@ -427,7 +466,11 @@ class GoogleAuthVerifier:
         while time.time() - start_time < timeout:
             self._ensure_active_window()
             current_url = self.driver.current_url.lower()
-            if "myaccount.google.com" in current_url or "accounts.google.com/checkcookie" in current_url:
+            if (
+                "myaccount.google.com" in current_url
+                or "accounts.google.com/checkcookie" in current_url
+                or "gds.google.com" in current_url
+            ):
                 return True
             time.sleep(2)
         return False
