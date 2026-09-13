@@ -1,0 +1,93 @@
+# ==============================================================================
+# Security & Sensitive Credentials (STRICTLY EXCLUDED)
+# ==============================================================================
+
+# Environment files and secrets
+.env
+.env.*
+.env*.local
+*.env
+!.env.example
+
+# Account credential lists & test fixtures (contain emails and passwords)
+accounts.txt
+*accounts*.txt
+*account*.txt
+temp_*.txt
+fixture_*.txt
+
+# Extracted session tokens, OAuth bearer tokens, and cookies
+verified_tokens.json
+verified_tokens.txt
+*tokens*.json
+*tokens*.txt
+*token*.json
+*token*.txt
+*.session
+*.cookie
+cookies.json
+token_storage.json
+
+# Browser user profiles, persistent session caches, and credentials
+chrome_profiles/
+empty_profile/
+user_data/
+profile_*/
+*profile*/
+Crashpad/
+*.pma
+*.db-journal
+
+# Audit reports and verification run summaries (contain audited user emails)
+audit_report.json
+audit_report.csv
+AUDIT_SUMMARY.md
+audit_logs/
+*.log
+
+# ==============================================================================
+# Non-essential Folders & Test Suites
+# ==============================================================================
+
+# Test suite and test artifacts
+tests/
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# ==============================================================================
+# Python & Runtime Artifacts
+# ==============================================================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+
+# Virtual Environments
+venv/
+.venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# ==============================================================================
+# IDE, Editor & OS Artifacts
+# ==============================================================================
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+.DS_Store
+Thumbs.db
+desktop.ini
+*.tmp
+*.bak
+*.swp
+*~
+
