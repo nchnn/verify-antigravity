@@ -51,6 +51,12 @@ class Settings:
     # How long (seconds) to wait for on-screen challenge / reCAPTCHA resolution
     challenge_timeout_seconds: int = int(os.getenv("CHALLENGE_TIMEOUT_SECONDS", "120"))
 
+    # Phone Validation & 9router Integration Settings
+    phone_validation_timeout_seconds: int = int(os.getenv("PHONE_VALIDATION_TIMEOUT_SECONDS", "180"))
+    sms_activate_api_key: str = os.getenv("SMS_ACTIVATE_API_KEY", "")
+    nine_router_db_path: Path = Path(os.path.expandvars(os.getenv("NINEROUTER_DB_PATH", r"%APPDATA%\9router\db\data.sqlite")))
+    auto_register_9router: bool = os.getenv("AUTO_REGISTER_9ROUTER", "true").lower() == "true"
+
 
 _settings_instance = None
 

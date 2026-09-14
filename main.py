@@ -75,8 +75,8 @@ def display_account_list(accounts: list[Account]):
 
 def _email_already_extracted(email: str, settings) -> bool:
     """
-    Returns True if this email already has tokens saved in verified_tokens.json
-    with at least one primary Google cookie present.
+    Returns True if this email already has valid tokens saved in verified_tokens.json
+    with a valid ya29 access token and cookies.
     """
     json_path = settings.base_dir / getattr(settings, "tokens_output_json", "verified_tokens.json")
     if not json_path.exists():
@@ -87,9 +87,12 @@ def _email_already_extracted(email: str, settings) -> bool:
         entry = data.get(email)
         if not entry:
             return False
-        # Must have at least SAPISID or SID in cookie_dict to be considered valid
+        at = entry.get("accessToken", "")
+        if not (at and at.startswith("ya29.")):
+            return False
         cookie_dict = entry.get("cookie_dict", {})
-        return bool(cookie_dict.get("SAPISID") or cookie_dict.get("SID"))
+        has_cookies = bool(cookie_dict.get("SAPISID") or cookie_dict.get("SID") or entry.get("cookies"))
+        return has_cookies
     except Exception:
         return False
 
@@ -218,22 +221,7 @@ def process_account(
         loader.remove_account(account.email)
         return
 
-    # -- STEP 2: DPAPI - extract directly from profile, no Chrome needed -------
-    if _profile_exists(account.email, settings) and extract_tokens:
-        dpapi_ok = _try_dpapi_extract(account.email, settings, extractor)
-        if dpapi_ok:
-            auditor.log_status(
-                email=account.email,
-                status=VerificationStatus.ALREADY_VERIFIED,
-                details="Session cookies extracted via DPAPI from profile - Chrome not launched.",
-                duration_seconds=0.0,
-            )
-            loader.remove_account(account.email)
-            return
-        else:
-            print(f"[~] Falling back to Chrome launch for sign-in: {account.email}")
-
-    # -- STEP 3: Retry loop - Chrome launch as last resort ---------------------
+    # -- STEP 2: Chrome verification & OAuth token extraction -----------------
     last_error = "Unknown error"
     for attempt in range(1, max_retries + 1):
         start_time = time.time()
@@ -250,7 +238,7 @@ def process_account(
 
             from auth.google_auth import GoogleAuthVerifier
             verifier = GoogleAuthVerifier(driver)
-            status, details = verifier.login_and_verify(account)
+            status, details, token_data = verifier.login_and_verify(account)
             duration = time.time() - start_time
 
             auditor.log_status(
@@ -263,9 +251,19 @@ def process_account(
             if status in (VerificationStatus.SUCCESS_VERIFIED, VerificationStatus.ALREADY_VERIFIED):
                 if extract_tokens and driver:
                     try:
-                        session_info = extractor.extract_session_data(driver, account.email)
+                        session_info = extractor.extract_session_data(driver, account.email, token_data=token_data)
                         extractor.save_session(session_info)
                         print(f"[*] Tokens & cookies extracted: {account.email} -> verified_tokens.json, verified_tokens.txt")
+                        if settings.auto_register_9router and token_data and token_data.get("refresh_token"):
+                            from auth.db_sync import NineRouterDbSync
+                            synced = NineRouterDbSync().sync_account(
+                                email=account.email,
+                                access_token=token_data.get("access_token", ""),
+                                refresh_token=token_data.get("refresh_token", ""),
+                                project_id="aicode-consumers",
+                            )
+                            if synced:
+                                print(f"[OK] Account registered and activated in 9router SQLite: {account.email}")
                     except Exception as ex:
                         print(f"[!] Warning: Token extraction failed for {account.email}: {ex}")
 
@@ -282,7 +280,7 @@ def process_account(
                 if removed:
                     print(f"[*] Verified: {account.email} automatically removed from {loader.file_path.name}")
 
-            elif status == VerificationStatus.ACCESS_FORBIDDEN and driver:
+            elif status in (VerificationStatus.ACCESS_FORBIDDEN, VerificationStatus.VALIDATION_REQUIRED) and driver:
                 profile_path = browser_manager.get_profile_path(account.email)
                 if profile_path:
                     browser_manager.flush_and_close(profile_path)

@@ -14,6 +14,40 @@ from config.settings import get_settings
 
 logger = logging.getLogger("AntigravityAuditor")
 
+# ── Patch undetected_chromedriver for Windows / Python 3.14 compatibility ──────
+# Prevents `OSError: [WinError 6] The handle is invalid` during driver.quit() / __del__()
+# and prevents undetected_chromedriver from attempting to rmtree persistent profiles.
+_original_uc_quit = uc.Chrome.quit
+
+
+def _safe_uc_quit(self):
+    self.keep_user_data_dir = True
+    try:
+        _original_uc_quit(self)
+    except OSError as e:
+        if getattr(e, "winerror", None) == 6 or "handle is invalid" in str(e).lower():
+            pass
+        else:
+            logger.debug(f"Suppressed quit OSError: {e}")
+    except Exception as e:
+        logger.debug(f"Suppressed quit exception: {e}")
+
+
+def _safe_uc_del(self):
+    try:
+        if hasattr(self, "service") and hasattr(self.service, "process") and self.service.process:
+            self.service.process.kill()
+    except Exception:
+        pass
+    try:
+        self.quit()
+    except Exception:
+        pass
+
+
+uc.Chrome.quit = _safe_uc_quit
+uc.Chrome.__del__ = _safe_uc_del
+
 
 class BrowserManager:
     """Manages undetected-chromedriver lifecycle and profile environments."""
@@ -173,6 +207,8 @@ class BrowserManager:
                 version_main=chrome_ver,
                 use_subprocess=True,
             )
+            # Ensure persistent profile directories are never deleted by uc cleanup
+            self.driver.keep_user_data_dir = True
             self.driver.set_page_load_timeout(self.settings.page_timeout_seconds)
             self.driver.implicitly_wait(10)
 

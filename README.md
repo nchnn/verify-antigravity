@@ -96,7 +96,7 @@ Run without opening the visible Chrome browser:
 python main.py --headless
 ```
 
-> **Tip**: Running with a visible browser (default, without `--headless`) is recommended on the first run. If Google triggers a 2-Step Verification prompt or phone tap, the script pauses for up to 60 seconds so you can tap or confirm it on screen.
+> **Tip**: Running with a visible browser (default, without `--headless`) is recommended on the first run. If Google triggers a 2-Step Verification prompt, QR code scan, or one-time phone verification link (`VALIDATION_REQUIRED`), the browser automatically presents the challenge and waits for on-screen completion.
 
 ---
 
@@ -109,7 +109,7 @@ After execution completes, the tool prints a clean, compact status summary in th
 ANTIGRAVITY ACCOUNT VERIFICATION COMPLETE
 =================================================================
 Total Accounts Processed: 5
-Results: SUCCESS_VERIFIED: 3, ACCESS_FORBIDDEN: 2, ERROR: 0
+Results: SUCCESS_VERIFIED: 3, ACCESS_FORBIDDEN: 1, CHALLENGE_REQUIRED: 1
 -----------------------------------------------------------------
 [*] Full Audit Summary saved to: AUDIT_SUMMARY.md
 [*] Data exports saved to:      audit_report.csv, audit_report.json
@@ -124,9 +124,9 @@ Results: SUCCESS_VERIFIED: 3, ACCESS_FORBIDDEN: 2, ERROR: 0
 ### Status Meanings:
 | Status | Description |
 | :--- | :--- |
-| `SUCCESS_VERIFIED` | Logged in and Antigravity access is verified and active. |
-| `ACCESS_FORBIDDEN` | Logged into Google, but Antigravity denies access (account requires waitlist/whitelist approval). |
-| `CHALLENGE_REQUIRED` | Google 2FA or verification prompt was triggered and timed out. |
+| `SUCCESS_VERIFIED` | Logged in, onboarded to standard-tier, and Antigravity access is confirmed and active. |
+| `ACCESS_FORBIDDEN` | Logged into Google, but Antigravity denies access (account requires waitlist/whitelist approval or quota remains locked). |
+| `CHALLENGE_REQUIRED` | Google 2FA, robot challenge, or phone verification (`VALIDATION_REQUIRED`) was triggered and timed out. |
 | `INVALID_CREDENTIALS` | Email was not found or password was incorrect. |
 | `ERROR` | Unexpected error or network timeout. |
 

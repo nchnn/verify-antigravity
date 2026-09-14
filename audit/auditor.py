@@ -21,6 +21,7 @@ class VerificationStatus(str, Enum):
     SUCCESS_VERIFIED = "SUCCESS_VERIFIED"
     ACCESS_FORBIDDEN = "ACCESS_FORBIDDEN"
     CHALLENGE_REQUIRED = "CHALLENGE_REQUIRED"
+    VALIDATION_REQUIRED = "VALIDATION_REQUIRED"
     INVALID_CREDENTIALS = "INVALID_CREDENTIALS"
     ALREADY_VERIFIED = "ALREADY_VERIFIED"
     SKIPPED_NO_PASSWORD = "SKIPPED_NO_PASSWORD"
@@ -87,7 +88,11 @@ class AccountAuditor:
             color = Fore.GREEN
         elif status == VerificationStatus.ACCESS_FORBIDDEN:
             color = Fore.RED
-        elif status in (VerificationStatus.CHALLENGE_REQUIRED, VerificationStatus.SKIPPED_NO_PASSWORD):
+        elif status in (
+            VerificationStatus.CHALLENGE_REQUIRED,
+            VerificationStatus.VALIDATION_REQUIRED,
+            VerificationStatus.SKIPPED_NO_PASSWORD,
+        ):
             color = Fore.YELLOW
         elif status in (VerificationStatus.INVALID_CREDENTIALS, VerificationStatus.ERROR):
             color = Fore.RED + Style.BRIGHT

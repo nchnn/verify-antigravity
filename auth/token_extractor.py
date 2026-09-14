@@ -31,12 +31,15 @@ class TokenExtractor:
     def __init__(self):
         self.settings = get_settings()
 
-    def extract_session_data(self, driver, email: str) -> Dict[str, Any]:
+    def extract_session_data(self, driver, email: str, token_data: dict = None) -> Dict[str, Any]:
         """
         Extracts cookies and local storage tokens from the active browser session.
         Uses Chrome DevTools Protocol (CDP) to extract all in-memory cookies across
         all domains (.google.com, accounts.google.com, antigravity.google), avoiding
         SQLite disk locks or Windows DPAPI decryption issues.
+
+        token_data: optional dict with 'access_token' and 'refresh_token' obtained
+                    during the OAuth code-exchange step (ya29.xxx Bearer tokens).
         """
         session_info: Dict[str, Any] = {
             "email": email,
@@ -94,6 +97,15 @@ class TokenExtractor:
         session_info["cookie_header"] = cookie_header
         # 9router token_loader expects 'cookies' to be a string or cookie header
         session_info["cookies"] = cookie_header
+
+        # Inject OAuth Bearer tokens from code-exchange if provided
+        if token_data:
+            at = token_data.get("access_token", "")
+            rt = token_data.get("refresh_token", "")
+            if at:
+                session_info["accessToken"] = at
+            if rt:
+                session_info["refreshToken"] = rt
 
         # 2. Extract LocalStorage & SessionStorage from current page
         try:
@@ -166,6 +178,20 @@ class TokenExtractor:
             except Exception:
                 data = {}
 
+        # Find primary bearer token if available
+        primary_token = session_info.get("accessToken", "")
+        if not primary_token:
+            for t_k, t_v in session_info.get("tokens", {}).items():
+                if not t_k.startswith("COOKIE_"):
+                    primary_token = t_v
+                    break
+
+        # Also store accessToken/refreshToken in the tokens dict for 9router
+        if session_info.get("accessToken"):
+            session_info["tokens"]["accessToken"] = session_info["accessToken"]
+        if session_info.get("refreshToken"):
+            session_info["tokens"]["refreshToken"] = session_info["refreshToken"]
+
         data[email] = session_info
 
         with open(json_path, "w", encoding="utf-8") as f:
@@ -185,13 +211,6 @@ class TokenExtractor:
                     ]
             except Exception:
                 existing_lines = []
-
-        # Find primary bearer token if available
-        primary_token = ""
-        for t_k, t_v in session_info.get("tokens", {}).items():
-            if not t_k.startswith("COOKIE_"):
-                primary_token = t_v
-                break
 
         cookies_str = session_info.get("cookies", "")
         # Format: email:accessToken:cookies (9router TokenLoader standard format)
