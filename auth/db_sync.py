@@ -1,5 +1,3 @@
-# File: auth/db_sync.py
-# Purpose: Sync verified Antigravity accounts directly with 9router SQLite database
 
 import os
 import json
@@ -16,14 +14,12 @@ logger = logging.getLogger("AntigravityAuditor")
 
 
 class NineRouterDbSync:
-    """Manages synchronization of verified OAuth tokens with 9router's SQLite database."""
 
     def __init__(self, db_path: Optional[Path] = None):
         self.settings = get_settings()
         self.db_path = Path(db_path or self.settings.nine_router_db_path)
 
     def is_available(self) -> bool:
-        """Returns True if the 9router database file exists and is accessible."""
         return self.db_path.exists() and self.db_path.is_file()
 
     def sync_account(
@@ -35,10 +31,6 @@ class NineRouterDbSync:
         expires_in: int = 3599,
         additional_data: Optional[Dict[str, Any]] = None,
     ) -> bool:
-        """
-        Inserts or updates an Antigravity account in 9router's providerConnections table.
-        Clears previous 401/403/429 errors and unlocks models immediately.
-        """
         if not self.is_available():
             logger.warning(f"9router database not found at {self.db_path}. Skipping SQLite sync.")
             return False
@@ -55,7 +47,6 @@ class NineRouterDbSync:
             conn = sqlite3.connect(str(self.db_path))
             cursor = conn.cursor()
 
-            # Ensure table exists
             cursor.execute(
                 "SELECT name FROM sqlite_master WHERE type='table' AND name='providerConnections'"
             )
@@ -64,7 +55,6 @@ class NineRouterDbSync:
                 conn.close()
                 return False
 
-            # Check if record already exists
             cursor.execute(
                 "SELECT id, data FROM providerConnections WHERE provider = 'antigravity' AND email = ?",
                 (email,),
@@ -78,7 +68,6 @@ class NineRouterDbSync:
                 except Exception:
                     data = {}
 
-                # Update OAuth fields
                 data["accessToken"] = access_token
                 data["refreshToken"] = refresh_token
                 data["projectId"] = project_id or data.get("projectId") or "aicode-consumers"
@@ -93,7 +82,6 @@ class NineRouterDbSync:
                 data["status"] = "active"
                 data["backoffLevel"] = 0
 
-                # Clear model lockouts
                 for key in list(data.keys()):
                     if key.startswith("modelLock_"):
                         del data[key]
@@ -126,7 +114,6 @@ class NineRouterDbSync:
                 if additional_data:
                     data.update(additional_data)
 
-                # Check table columns dynamically
                 cursor.execute("PRAGMA table_info(providerConnections)")
                 cols = {c[1] for c in cursor.fetchall()}
 

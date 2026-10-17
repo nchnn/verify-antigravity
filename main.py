@@ -1,6 +1,6 @@
 # File: main.py
 # Created: 2026-09-12 11:57 PM
-# Last Modified: 2026-09-13 04:12 AM
+# Last Modified: 2026-09-14 05:18 PM
 
 import re
 import json
@@ -75,8 +75,14 @@ def display_account_list(accounts: list[Account]):
 
 def _email_already_extracted(email: str, settings) -> bool:
     """
-    Returns True if this email already has valid tokens saved in verified_tokens.json
-    with a valid ya29 access token and cookies.
+    Returns True if this email already has valid tokens saved in verified_tokens.json.
+
+    Accepts either:
+      1. Full OAuth extraction: ya29 access token + cookies  (source: browser_cdp)
+      2. DPAPI cookie-only extraction: valid SAPISID/SID     (source: dpapi_profile)
+
+    Both are considered "extracted" — the difference is that dpapi_profile entries
+    won't have OAuth tokens, so 9router won't be synced. But the cookies are valid.
     """
     json_path = settings.base_dir / getattr(settings, "tokens_output_json", "verified_tokens.json")
     if not json_path.exists():
@@ -87,12 +93,20 @@ def _email_already_extracted(email: str, settings) -> bool:
         entry = data.get(email)
         if not entry:
             return False
+
+        # Check if we have OAuth tokens (full extraction)
         at = entry.get("accessToken", "")
-        if not (at and at.startswith("ya29.")):
-            return False
+        if at and at.startswith("ya29."):
+            cookie_dict = entry.get("cookie_dict", {})
+            has_cookies = bool(cookie_dict.get("SAPISID") or cookie_dict.get("SID") or entry.get("cookies"))
+            return has_cookies
+
+        # Check if we have valid cookies from DPAPI extraction (cookies-only is also valid)
         cookie_dict = entry.get("cookie_dict", {})
-        has_cookies = bool(cookie_dict.get("SAPISID") or cookie_dict.get("SID") or entry.get("cookies"))
-        return has_cookies
+        if cookie_dict.get("SAPISID") or cookie_dict.get("SID"):
+            return True
+
+        return False
     except Exception:
         return False
 
@@ -121,18 +135,18 @@ def _force_kill_chrome():
                 pass
         if killed:
             print(f"[~] Killed {killed} lingering Chrome process(es).")
-        time.sleep(1.5)  # Give OS time to release file locks
+        time.sleep(1.0)  # Give OS time to release file locks
     except ImportError:
         pass
 
 
-def _launch_driver_with_timeout(browser_manager, account_email: str, timeout: int):
+def _launch_driver_with_timeout(browser_manager, account, timeout: int):
     """
     Launches Chrome in a background thread with a strict timeout.
     Raises TimeoutError if Chrome doesn't open within `timeout` seconds.
     """
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-        future = executor.submit(browser_manager.create_driver, account_email)
+        future = executor.submit(browser_manager.create_driver, account)
         try:
             return future.result(timeout=timeout)
         except concurrent.futures.TimeoutError:
@@ -148,6 +162,18 @@ def _try_dpapi_extract(
     """
     Attempts to extract auth cookies directly from the Chrome profile using
     Windows DPAPI + AES-256-GCM decryption — no browser launch needed.
+
+    Builds a complete session_info with every field 9router / OmniRoute needs:
+      - cookie_dict    → ALL decrypted Google auth cookies
+      - cookies        → HTTP Cookie header string
+      - tokens         → COOKIE_* entries for every auth cookie found
+      - accessToken    → empty string (not available from profile — requires OAuth)
+      - refreshToken   → empty string (not available from profile — requires OAuth)
+      - source         → "dpapi_profile" (so downstream can tell this was offline extraction)
+
+    NOTE: OAuth tokens (accessToken/refreshToken) are NOT in Chrome profiles.
+    This extraction provides cookies only. 9router needs OAuth tokens for full
+    API connectivity — a browser OAuth flow is still required for those.
 
     Returns True if cookies were successfully extracted and saved.
     """
@@ -168,23 +194,35 @@ def _try_dpapi_extract(
         print(f"[~] Profile directory exists for {account_email}, but no active Google session found in SQLite. Sign-in required.")
         return False
 
-    # Build a session_info compatible with TokenExtractor.save_session()
+    # Build a session_info with ALL fields 9router / OmniRoute expects
     cookie_header = pe.build_cookie_header(cookie_dict)
+
+    # Include COOKIE_* token entries for every Google auth cookie found
+    all_auth_cookie_names = [
+        "SAPISID", "SID", "__Secure-1PSID", "__Secure-3PSID", "SSID", "HSID",
+        "APISID", "__Secure-1PAPISID", "__Secure-3PAPISID", "SIDCC",
+        "__Secure-1PSIDCC", "__Secure-3PSIDCC", "__Secure-1PSIDTS",
+        "__Secure-3PSIDTS", "LSID", "OSID", "__Secure-OSID",
+        "__Host-1PLSID", "__Host-3PLSID", "__Host-GAPS", "__Host-GAPSTS",
+    ]
     tokens = {
         f"COOKIE_{k}": v
         for k, v in cookie_dict.items()
-        if k in ["SAPISID", "SID", "__Secure-1PSID", "__Secure-3PSID", "SSID", "HSID", "APISID"]
+        if k in all_auth_cookie_names
     }
 
     session_info = {
         "email": account_email,
         "extracted_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "portal_url": "(extracted directly from profile - Chrome bypassed)",
+        "portal_url": "(extracted directly from profile — Chrome bypassed)",
         "cookies": cookie_header,
         "cookie_header": cookie_header,
         "cookie_dict": cookie_dict,
         "tokens": tokens,
         "storage": {},
+        # OAuth tokens — not available from Chrome profile, require browser OAuth flow
+        "accessToken": "",
+        "refreshToken": "",
         "source": "dpapi_profile",
     }
 
@@ -192,6 +230,10 @@ def _try_dpapi_extract(
     print(
         f"[OK] Direct profile extraction successful: {len(cookie_dict)} cookies saved "
         f"for {account_email} (Chrome launch bypassed!)"
+    )
+    print(
+        f"[~] NOTE: OAuth tokens (accessToken/refreshToken) are NOT in the Chrome profile. "
+        f"9router / OmniRoute needs a browser OAuth flow to obtain them."
     )
     return True
 
@@ -204,24 +246,47 @@ def process_account(
     loader,
     extractor,
     extract_tokens: bool = True,
+    skipped_credentials: list = None,
 ):
     settings = browser_manager.settings
     max_retries = settings.max_retries_per_account
     launch_timeout = settings.chrome_launch_timeout_seconds
 
-    # -- STEP 1: Skip Chrome - tokens already in verified_tokens.json ---------
+    # -- STEP 1: Validate existing tokens & refresh if expired --------
     if _email_already_extracted(account.email, settings):
-        print(f"[OK] SKIPPING Chrome - tokens already extracted for: {account.email}")
-        auditor.log_status(
-            email=account.email,
-            status=VerificationStatus.ALREADY_VERIFIED,
-            details="Tokens already present in verified_tokens.json - Chrome not launched.",
-            duration_seconds=0.0,
-        )
-        loader.remove_account(account.email)
-        return
+        is_valid, detail = extractor.validate_and_refresh_stored_token(account.email)
+        if is_valid:
+            print(f"[OK] SKIPPING Chrome — {detail}: {account.email}")
+            auditor.log_status(
+                email=account.email,
+                status=VerificationStatus.ALREADY_VERIFIED,
+                details=f"Token validated/refreshed — Chrome not launched. {detail}",
+                duration_seconds=0.0,
+            )
+            loader.remove_account(account.email)
+            return
+        else:
+            # Token expired and refresh failed — fall through to re-extract via OAuth
+            print(f"[~] Stored token stale for {account.email}: {detail}")
+            print(f"[~] Proceeding to Chrome OAuth for fresh extraction...")
 
-    # -- STEP 2: Chrome verification & OAuth token extraction -----------------
+    # -- STEP 2: Try DPAPI extraction from existing Chrome profile (no Chrome launch) --
+    #    Extracts cookies directly from Default/Network/Cookies using DPAPI + AES-256-GCM.
+    #    Saves cookies to verified_tokens.json but OAuth tokens will be empty — Chrome
+    #    browser OAuth flow is still needed for accessToken/refreshToken (9router requirement).
+    if extract_tokens and _profile_exists(account.email, settings):
+        dpapi_ok = _try_dpapi_extract(account.email, settings, extractor)
+        if dpapi_ok:
+            auditor.log_status(
+                email=account.email,
+                status=VerificationStatus.ALREADY_VERIFIED,
+                details="Cookies extracted from Chrome profile via DPAPI (no browser launched). OAuth tokens still needed for 9router.",
+                duration_seconds=0.0,
+            )
+            # Do NOT remove from accounts.txt — still needs OAuth flow for full 9router sync
+            return
+
+    # -- STEP 3: Chrome verification & OAuth token extraction -----------------
     last_error = "Unknown error"
     for attempt in range(1, max_retries + 1):
         start_time = time.time()
@@ -231,10 +296,10 @@ def process_account(
             if attempt > 1:
                 print(f"[RETRY] Retry {attempt}/{max_retries} for: {account.email}")
                 _force_kill_chrome()
-                time.sleep(3)
+                time.sleep(1.5)
 
             # Timeout-guarded Chrome launch
-            driver = _launch_driver_with_timeout(browser_manager, account.email, launch_timeout)
+            driver = _launch_driver_with_timeout(browser_manager, account, launch_timeout)
 
             from auth.google_auth import GoogleAuthVerifier
             verifier = GoogleAuthVerifier(driver)
@@ -279,6 +344,15 @@ def process_account(
                 removed = loader.remove_account(account.email)
                 if removed:
                     print(f"[*] Verified: {account.email} automatically removed from {loader.file_path.name}")
+
+            elif status == VerificationStatus.INVALID_CREDENTIALS:
+                # Wrong password or account not found — skip this email entirely.
+                # Keep the account in accounts.txt so the user can correct the password.
+                if skipped_credentials is not None:
+                    skipped_credentials.append(account.email)
+                print(f"[SKIP] Skipping {account.email} — {details}")
+                print(f"[SKIP] Account kept in {loader.file_path.name} — update the password and re-run.")
+                return  # <- skip, do not retry, do not remove from accounts.txt
 
             elif status in (VerificationStatus.ACCESS_FORBIDDEN, VerificationStatus.VALIDATION_REQUIRED) and driver:
                 profile_path = browser_manager.get_profile_path(account.email)
@@ -341,6 +415,7 @@ def main():
     print("=" * 60 + "\n")
 
     browser_manager = BrowserManager(headless=args.headless or settings.browser_headless)
+    skipped_credentials: list[str] = []  # Accounts skipped due to wrong password
 
     try:
         for index, acc in enumerate(accounts, start=1):
@@ -352,14 +427,27 @@ def main():
                 loader=loader,
                 extractor=extractor,
                 extract_tokens=extract_enabled,
+                skipped_credentials=skipped_credentials,
             )
-            time.sleep(settings.action_delay_seconds)
+            time.sleep(0.5)  # Brief pause between accounts
     except KeyboardInterrupt:
         print("\nVerification process interrupted by user.")
     finally:
         # Export reports and display tabular audit summary
         auditor.export_reports()
         auditor.print_summary()
+
+        # Print skipped accounts summary (wrong password / account not found)
+        if skipped_credentials:
+            print(f"\n{'=' * 60}")
+            print(f"⚠️  SKIPPED ACCOUNTS — INVALID CREDENTIALS ({len(skipped_credentials)})")
+            print(f"{'=' * 60}")
+            print("The following accounts were skipped due to incorrect password")
+            print("or unrecognized email. They remain in accounts.txt so you can")
+            print("fix the password and re-run.\n")
+            for i, email in enumerate(skipped_credentials, start=1):
+                print(f"  [{i:02d}] {email}")
+            print(f"\n{'=' * 60}\n")
 
 
 if __name__ == "__main__":

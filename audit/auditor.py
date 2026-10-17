@@ -1,6 +1,3 @@
-# File: auditor.py
-# Created: 2026-09-12 11:56 PM
-# Last Modified: 2026-09-12 11:56 PM
 
 import csv
 import json
@@ -43,7 +40,6 @@ class AuditRecord:
 
 
 class AccountAuditor:
-    """Tracks, logs, and exports audit records for account verification processes."""
 
     def __init__(self, log_level: int = logging.INFO):
         self.settings = get_settings()
@@ -69,7 +65,6 @@ class AccountAuditor:
         details: str = "",
         duration_seconds: float = 0.0,
     ) -> AuditRecord:
-        # Clean details to avoid multi-line stacktraces polluting logs and tables
         clean_detail = details.strip().split("\n")[0]
         if "Stacktrace:" in clean_detail:
             clean_detail = clean_detail.split("Stacktrace:")[0].strip()
@@ -103,7 +98,6 @@ class AccountAuditor:
         return record
 
     def export_reports(self):
-        """Exports audit records to Markdown, JSON, and CSV files."""
         self._export_json()
         self._export_csv()
         self._export_markdown()
@@ -134,7 +128,6 @@ class AccountAuditor:
                 )
 
     def _export_markdown(self):
-        """Generates a clean GitHub Flavored Markdown audit summary file."""
         md_path = self.settings.audit_report_md
         now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -193,7 +186,6 @@ class AccountAuditor:
             f.write("\n".join(md_lines))
 
     def print_summary(self):
-        """Prints a clean, compact summary to terminal and points to AUDIT_SUMMARY.md."""
         if not self.records:
             print("\nNo accounts were audited.")
             return

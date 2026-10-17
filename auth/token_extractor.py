@@ -1,13 +1,14 @@
-# File: token_extractor.py
-# Created: 2026-09-13 01:00 AM
-# Last Modified: 2026-09-13 02:25 AM
 
+import os
 import re
 import json
 import logging
+import urllib.parse
+import urllib.request
+import urllib.error
 from pathlib import Path
 from datetime import datetime
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 
 from config.settings import get_settings
 
@@ -15,9 +16,7 @@ logger = logging.getLogger("AntigravityAuditor")
 
 
 class TokenExtractor:
-    """Extracts session cookies, localStorage tokens, and auth data from the verified browser."""
 
-    # Key Google authentication cookies required by routers / API proxies
     PRIMARY_GOOGLE_COOKIES = [
         "SAPISID",
         "__Secure-1PSID",
@@ -28,19 +27,205 @@ class TokenExtractor:
         "APISID",
     ]
 
+    ALL_GOOGLE_AUTH_COOKIES = [
+        "SAPISID",
+        "SID",
+        "__Secure-1PSID",
+        "__Secure-3PSID",
+        "SSID",
+        "HSID",
+        "APISID",
+        "__Secure-1PAPISID",
+        "__Secure-3PAPISID",
+        "SIDCC",
+        "__Secure-1PSIDCC",
+        "__Secure-3PSIDCC",
+        "__Secure-1PSIDTS",
+        "__Secure-3PSIDTS",
+        "LSID",
+        "OSID",
+        "__Secure-OSID",
+        "__Host-1PLSID",
+        "__Host-3PLSID",
+        "__Host-GAPS",
+        "__Host-GAPSTS",
+    ]
+
+    _TOKENINFO_URL = "https://oauth2.googleapis.com/tokeninfo"
+    _TOKEN_REFRESH_URL = "https://oauth2.googleapis.com/token"
+
     def __init__(self):
         self.settings = get_settings()
 
-    def extract_session_data(self, driver, email: str, token_data: dict = None) -> Dict[str, Any]:
-        """
-        Extracts cookies and local storage tokens from the active browser session.
-        Uses Chrome DevTools Protocol (CDP) to extract all in-memory cookies across
-        all domains (.google.com, accounts.google.com, antigravity.google), avoiding
-        SQLite disk locks or Windows DPAPI decryption issues.
 
-        token_data: optional dict with 'access_token' and 'refresh_token' obtained
-                    during the OAuth code-exchange step (ya29.xxx Bearer tokens).
-        """
+    def validate_token(self, access_token: str) -> Tuple[bool, Optional[int]]:
+        if not access_token or not access_token.startswith("ya29."):
+            return False, None
+
+        try:
+            url = f"{self._TOKENINFO_URL}?access_token={urllib.parse.quote(access_token, safe='')}"
+            req = urllib.request.Request(url, method="GET")
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                expires_in = int(data.get("expires_in", 0))
+                if expires_in > 0:
+                    logger.info(
+                        f"Token valid — expires in {expires_in}s "
+                        f"(email: {data.get('email', 'unknown')})"
+                    )
+                    return True, expires_in
+                return False, None
+        except urllib.error.HTTPError as he:
+            logger.debug(f"tokeninfo returned HTTP {he.code} — token expired or invalid")
+            return False, None
+        except Exception as e:
+            logger.debug(f"tokeninfo check failed: {e}")
+            return False, None
+
+    def refresh_access_token(self, refresh_token: str) -> Tuple[Optional[str], Optional[str]]:
+        if not refresh_token:
+            logger.debug("No refresh_token provided — cannot refresh")
+            return None, None
+
+        client_id = os.environ.get("AG_CLIENT_ID", "")
+        client_secret = os.environ.get("AG_CLIENT_SECRET", "")
+        if not client_id or not client_secret:
+            logger.warning("AG_CLIENT_ID / AG_CLIENT_SECRET not set — cannot refresh token")
+            return None, None
+
+        try:
+            body = urllib.parse.urlencode({
+                "client_id": client_id,
+                "client_secret": client_secret,
+                "refresh_token": refresh_token,
+                "grant_type": "refresh_token",
+            }).encode("utf-8")
+
+            req = urllib.request.Request(
+                self._TOKEN_REFRESH_URL,
+                data=body,
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                token_data = json.loads(resp.read().decode("utf-8"))
+
+            new_access_token = token_data.get("access_token")
+            new_refresh_token = token_data.get("refresh_token", refresh_token)
+
+            if new_access_token:
+                logger.info(f"Access token refreshed successfully (expires_in={token_data.get('expires_in')})")
+                return new_access_token, new_refresh_token
+            else:
+                logger.warning("Token refresh response did not contain access_token")
+                return None, None
+
+        except urllib.error.HTTPError as he:
+            err_body = he.read().decode("utf-8", errors="replace")[:300]
+            logger.warning(f"Token refresh failed — HTTP {he.code}: {err_body}")
+            return None, None
+        except Exception as e:
+            logger.warning(f"Token refresh failed: {e}")
+            return None, None
+
+    def validate_and_refresh_stored_token(self, email: str) -> Tuple[bool, str]:
+        json_path = self.settings.base_dir / getattr(
+            self.settings, "tokens_output_json", "verified_tokens.json"
+        )
+        if not json_path.exists():
+            return False, "verified_tokens.json does not exist"
+
+        try:
+            with open(json_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception as e:
+            return False, f"Failed to read verified_tokens.json: {e}"
+
+        entry = data.get(email)
+        if not entry:
+            return False, f"No entry found for {email}"
+
+        access_token = entry.get("accessToken", "")
+        refresh_token = entry.get("refreshToken", "")
+
+        if access_token and access_token.startswith("ya29."):
+            is_valid, remaining = self.validate_token(access_token)
+            if is_valid:
+                return True, f"Access token still valid (expires in {remaining}s)"
+            logger.info(f"Access token expired for {email} — attempting refresh...")
+            print(f"[~] Access token expired for {email} — refreshing...")
+        else:
+            if not refresh_token:
+                return False, "No access token and no refresh token — re-auth required"
+            logger.info(f"No access token for {email}, refresh_token present — refreshing...")
+            print(f"[~] No access token for {email} — refreshing with stored refresh_token...")
+
+        if not refresh_token:
+            return False, "Access token expired and no refresh_token — re-auth required"
+
+        new_access, new_refresh = self.refresh_access_token(refresh_token)
+        if not new_access:
+            return False, "Access token expired and refresh failed — re-auth required"
+
+        print(f"[OK] Token refreshed for {email}")
+        entry["accessToken"] = new_access
+        entry["refreshToken"] = new_refresh or refresh_token
+        if "tokens" in entry:
+            entry["tokens"]["accessToken"] = new_access
+            entry["tokens"]["refreshToken"] = new_refresh or refresh_token
+        entry["last_refreshed_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        data[email] = entry
+
+        try:
+            with open(json_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+            logger.info(f"Updated verified_tokens.json with refreshed token for {email}")
+        except Exception as e:
+            logger.warning(f"Failed to write refreshed token to JSON: {e}")
+
+        self._update_txt_token(email, new_access, new_refresh or refresh_token, entry.get("cookies", ""))
+
+        if self.settings.auto_register_9router and (new_refresh or refresh_token):
+            try:
+                from auth.db_sync import NineRouterDbSync
+                synced = NineRouterDbSync().sync_account(
+                    email=email,
+                    access_token=new_access,
+                    refresh_token=new_refresh or refresh_token,
+                )
+                if synced:
+                    print(f"[OK] Refreshed token synced to 9router for {email}")
+            except Exception as e:
+                logger.warning(f"Failed to sync refreshed token to 9router: {e}")
+
+        return True, f"Access token refreshed successfully for {email}"
+
+    def _update_txt_token(self, email: str, access_token: str, refresh_token: str, cookies_str: str):
+        txt_path = self.settings.base_dir / getattr(
+            self.settings, "tokens_output_txt", "verified_tokens.txt"
+        )
+
+        existing_lines: List[str] = []
+        if txt_path.exists():
+            try:
+                with open(txt_path, "r", encoding="utf-8") as f:
+                    existing_lines = [
+                        l for l in f.readlines() if not l.strip().startswith(f"{email}:")
+                    ]
+            except Exception:
+                existing_lines = []
+
+        new_entry = f"{email}:{access_token}:{refresh_token}:{cookies_str}\n"
+        existing_lines.append(new_entry)
+
+        try:
+            with open(txt_path, "w", encoding="utf-8") as f:
+                f.writelines(existing_lines)
+            logger.info(f"Updated verified_tokens.txt with refreshed token for {email}")
+        except Exception as e:
+            logger.warning(f"Failed to update verified_tokens.txt: {e}")
+
+    def extract_session_data(self, driver, email: str, token_data: dict = None) -> Dict[str, Any]:
         session_info: Dict[str, Any] = {
             "email": email,
             "extracted_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -50,6 +235,9 @@ class TokenExtractor:
             "cookie_dict": {},
             "tokens": {},
             "storage": {},
+            "accessToken": "",
+            "refreshToken": "",
+            "source": "browser_cdp",
         }
 
         try:
@@ -57,13 +245,11 @@ class TokenExtractor:
         except Exception:
             session_info["portal_url"] = ""
 
-        # 1. Extract All Cookies in Memory via CDP (Cross-Domain)
         cookie_dict: Dict[str, str] = {}
         google_cookie_pairs: List[str] = []
         all_cookie_pairs: List[str] = []
 
         try:
-            # Query all cookies in the active browser memory
             cdp_result = driver.execute_cdp_cmd("Network.getAllCookies", {})
             raw_cookies = cdp_result.get("cookies", [])
         except Exception as e:
@@ -84,21 +270,16 @@ class TokenExtractor:
             pair = f"{name}={val}"
             all_cookie_pairs.append(pair)
 
-            # Prioritize Google authentication cookies
             if name in self.PRIMARY_GOOGLE_COOKIES or "google" in domain.lower():
                 google_cookie_pairs.append(pair)
 
-        # Assemble cookie headers
-        # Use google_cookie_pairs if found, else all cookie pairs
         active_pairs = google_cookie_pairs if google_cookie_pairs else all_cookie_pairs
         cookie_header = "; ".join(active_pairs)
 
         session_info["cookie_dict"] = cookie_dict
         session_info["cookie_header"] = cookie_header
-        # 9router token_loader expects 'cookies' to be a string or cookie header
         session_info["cookies"] = cookie_header
 
-        # Inject OAuth Bearer tokens from code-exchange if provided
         if token_data:
             at = token_data.get("access_token", "")
             rt = token_data.get("refresh_token", "")
@@ -107,7 +288,6 @@ class TokenExtractor:
             if rt:
                 session_info["refreshToken"] = rt
 
-        # 2. Extract LocalStorage & SessionStorage from current page
         try:
             local_storage = driver.execute_script(
                 "var items = {}; for (var i=0; i<localStorage.length; i++) { var k = localStorage.key(i); items[k] = localStorage.getItem(k); } return items;"
@@ -124,13 +304,11 @@ class TokenExtractor:
         except Exception as e:
             logger.debug(f"Error extracting sessionStorage for {email}: {e}")
 
-        # 3. Detect OAuth/Bearer/JWT tokens in cookies and storage
         self._find_tokens(session_info)
 
         return session_info
 
     def _find_tokens(self, session_info: Dict[str, Any]):
-        """Scans cookies and storage for OAuth Bearer tokens, Google ya29 tokens, or JWTs."""
         tokens: Dict[str, str] = {}
 
         combined_storage = {
@@ -152,21 +330,15 @@ class TokenExtractor:
                 if matches:
                     tokens[key] = matches[0]
 
-        # Key Google auth cookies
-        for cookie_name in self.PRIMARY_GOOGLE_COOKIES:
+        for cookie_name in self.ALL_GOOGLE_AUTH_COOKIES:
             if cookie_name in session_info["cookie_dict"]:
                 tokens[f"COOKIE_{cookie_name}"] = session_info["cookie_dict"][cookie_name]
 
         session_info["tokens"] = tokens
 
     def save_session(self, session_info: Dict[str, Any]):
-        """
-        Saves the extracted session to verified_tokens.json and verified_tokens.txt
-        in formats directly compatible with 9router's TokenLoader.
-        """
         email = session_info["email"]
 
-        # 1. Update verified_tokens.json
         json_path = self.settings.base_dir / getattr(
             self.settings, "tokens_output_json", "verified_tokens.json"
         )
@@ -178,7 +350,6 @@ class TokenExtractor:
             except Exception:
                 data = {}
 
-        # Find primary bearer token if available
         primary_token = session_info.get("accessToken", "")
         if not primary_token:
             for t_k, t_v in session_info.get("tokens", {}).items():
@@ -186,7 +357,13 @@ class TokenExtractor:
                     primary_token = t_v
                     break
 
-        # Also store accessToken/refreshToken in the tokens dict for 9router
+        if "accessToken" not in session_info:
+            session_info["accessToken"] = ""
+        if "refreshToken" not in session_info:
+            session_info["refreshToken"] = ""
+        if "source" not in session_info:
+            session_info["source"] = "unknown"
+
         if session_info.get("accessToken"):
             session_info["tokens"]["accessToken"] = session_info["accessToken"]
         if session_info.get("refreshToken"):
@@ -197,7 +374,6 @@ class TokenExtractor:
         with open(json_path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
 
-        # 2. Update verified_tokens.txt (format: email:accessToken:cookies)
         txt_path = self.settings.base_dir / getattr(
             self.settings, "tokens_output_txt", "verified_tokens.txt"
         )
@@ -213,8 +389,8 @@ class TokenExtractor:
                 existing_lines = []
 
         cookies_str = session_info.get("cookies", "")
-        # Format: email:accessToken:cookies (9router TokenLoader standard format)
-        new_entry = f"{email}:{primary_token}:{cookies_str}\n"
+        refresh_token = session_info.get("refreshToken", "")
+        new_entry = f"{email}:{primary_token}:{refresh_token}:{cookies_str}\n"
         existing_lines.append(new_entry)
 
         with open(txt_path, "w", encoding="utf-8") as f:

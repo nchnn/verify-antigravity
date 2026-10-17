@@ -1,15 +1,15 @@
-# File: auth/phone_verifier.py
-# Purpose: Automated resolution and handling for Antigravity one-time phone / device verification
 
 import re
 import time
 import json
+import random
 import logging
 import urllib.request
 import urllib.parse
 from typing import Optional, Dict, Any, Tuple
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
+from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 
@@ -20,10 +20,6 @@ logger = logging.getLogger("AntigravityAuditor")
 
 
 class PhoneValidationHandler:
-    """
-    Handles or bypasses one-time phone / device verification (VALIDATION_REQUIRED)
-    encountered during Antigravity onboarding and loadCodeAssist checks.
-    """
 
     SUCCESS_MARKERS = [
         "auth_success_gemini",
@@ -49,12 +45,6 @@ class PhoneValidationHandler:
 
     @staticmethod
     def normalize_validation_url(url: str, email: Optional[str] = None) -> str:
-        """
-        Cleans and fixes Google validation URLs.
-        Google Cloud Code returns URLs with trailing naked '&authuser', which
-        causes accounts.google.com to discard the session and redirect to identifierId.
-        Appends '=0' or '=email' to preserve the active profile session.
-        """
         if not url:
             return ""
 
@@ -68,10 +58,6 @@ class PhoneValidationHandler:
         return fixed
 
     def extract_qr_challenge(self) -> Optional[Dict[str, str]]:
-        """
-        Detects if Google is presenting the idvanyphonechallengeqrcode screen
-        and extracts the embedded base64 QR code and phone verification URL.
-        """
         if not self.driver:
             return None
 
@@ -118,7 +104,6 @@ class PhoneValidationHandler:
             return None
 
     def click_consent_or_next(self) -> bool:
-        """Finds and clicks any terms, upleveling confirmation, or Next buttons."""
         if not self.driver:
             return False
 
@@ -130,7 +115,7 @@ class PhoneValidationHandler:
                 txt = (btn.text or "").strip().lower()
                 if any(target in txt for target in self.CONSENT_BUTTON_TEXTS):
                     logger.info(f"Clicking validation consent button: '{btn.text}'")
-                    self.driver.execute_script("arguments[0].click();", btn)
+                    ActionChains(self.driver).move_to_element(btn).pause(random.uniform(0.1, 0.3)).click().perform()
                     time.sleep(2)
                     return True
 
@@ -139,7 +124,7 @@ class PhoneValidationHandler:
                 for elem in elems:
                     if elem.is_displayed():
                         logger.info(f"Clicking next container: #{cid}")
-                        elem.click()
+                        ActionChains(self.driver).move_to_element(elem).pause(random.uniform(0.1, 0.3)).click().perform()
                         time.sleep(2)
                         return True
         except Exception as e:
@@ -148,7 +133,6 @@ class PhoneValidationHandler:
         return False
 
     def handle_phone_number_input(self, account: Account) -> bool:
-        """Detects phone number input fields during verification."""
         if not self.driver:
             return False
 
@@ -161,33 +145,22 @@ class PhoneValidationHandler:
                 return False
 
             logger.info(f"Phone number input screen encountered for {account.email}.")
-            # ponytail: Automated SMS provider integration ceiling; add full webhook matrix when needed
             return False
         except Exception as e:
             logger.debug(f"Phone form check error: {e}")
             return False
 
     def is_success_url(self, url: str) -> bool:
-        """
-        Checks whether the current URL represents true completion of validation.
-
-        IMPORTANT: The validation URL itself contains 'auth_success_gemini' and other
-        success markers inside its '&continue=' query parameter. We must only match
-        against the URL host (netloc) and path — never the raw query string — to avoid
-        a false-positive that fires the moment Chrome loads the validation page.
-        """
         if not url:
             return False
         try:
             parsed = urllib.parse.urlparse(url.lower())
-            host = parsed.netloc      # e.g. "developers.google.com"
-            path = parsed.path        # e.g. "/gemini-code-assist/auth/auth_success_gemini"
-            host_path = host + path   # compare only against host + path
+            host = parsed.netloc
+            path = parsed.path
+            host_path = host + path
         except Exception:
             host_path = url.lower()
 
-        # accounts.google.com/signin/continue is where we START — never a success URL.
-        # Reject it explicitly so the query-param substring can never match.
         if "accounts.google.com/signin/continue" in host_path:
             return False
 
@@ -205,11 +178,6 @@ class PhoneValidationHandler:
         validation_url: str,
         timeout: Optional[int] = None,
     ) -> bool:
-        """
-        Automates resolution of the validation URL.
-        Navigates within the authenticated browser session, handles on-screen consent,
-        monitors for QR / phone completion, and waits for successful verification redirect.
-        """
         if not self.driver or not validation_url:
             return False
 

@@ -1,11 +1,12 @@
 # File: google_auth.py
 # Created: 2026-09-12 11:56 PM
-# Last Modified: 2026-09-14 12:55 PM
+# Last Modified: 2026-09-14 05:18 PM
 
 import os
 import re
 import time
 import json
+import random
 import logging
 import threading
 import urllib.parse
@@ -14,6 +15,7 @@ import urllib.error
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from typing import Optional, Tuple
 from selenium.webdriver.common.by import By
+from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, NoSuchElementException
@@ -86,12 +88,12 @@ class GoogleAuthVerifier:
             return ""
 
     def _click_next(self, container_id: str):
-        """Clicks the specific Next button without clicking 'Forgot email' or 'Forgot password'."""
+        """Clicks the specific Next button natively with ActionChains and random pause."""
         try:
             btn = self.driver.find_element(
                 By.CSS_SELECTOR, f"#{container_id} button, #{container_id}"
             )
-            btn.click()
+            ActionChains(self.driver).move_to_element(btn).pause(random.uniform(0.1, 0.3)).click().perform()
             return
         except Exception:
             pass
@@ -100,7 +102,7 @@ class GoogleAuthVerifier:
             btn = self.driver.find_element(
                 By.XPATH, "//button[.//span[text()='Next'] or contains(., 'Next')]"
             )
-            btn.click()
+            ActionChains(self.driver).move_to_element(btn).pause(random.uniform(0.1, 0.3)).click().perform()
             return
         except Exception:
             pass
@@ -110,6 +112,15 @@ class GoogleAuthVerifier:
         Executes full authentication and Antigravity verification flow for an account.
         Checks the profile's existing cookies first before interacting with Google login.
         """
+        if self.settings.browser_headless:
+            logger.warning(
+                f"[WARNING] Running Google authentication routines in HEADLESS mode for {account.email}! "
+                "Google flags headless environments and blocks interactive CAPTCHAs/challenges. "
+                "Headed mode is strongly recommended."
+            )
+            print(f"\n[!] WARNING: Google authentication routine running in HEADLESS mode for {account.email}!")
+            print("[!] Headless execution significantly increases detection risk and blocks manual challenge resolution.\n")
+
         if not account.password:
             return (
                 VerificationStatus.SKIPPED_NO_PASSWORD,
@@ -126,7 +137,7 @@ class GoogleAuthVerifier:
         try:
             self._ensure_active_window()
             self.driver.get("https://accounts.google.com/")
-            time.sleep(self.settings.action_delay_seconds)
+            time.sleep(1.0)  # Quick page hydration check
             self._ensure_active_window()
 
             current_url = self._current_url()
@@ -173,7 +184,7 @@ class GoogleAuthVerifier:
         try:
             self._ensure_active_window()
             self.driver.get("https://accounts.google.com/signin/v2/identifier?hl=en")
-            time.sleep(self.settings.action_delay_seconds)
+            time.sleep(1.0)  # Wait for sign-in page load
             self._ensure_active_window()
 
             # Check for Google "toomanysessions"
@@ -184,18 +195,18 @@ class GoogleAuthVerifier:
                 try:
                     here_link = self.driver.find_element(By.PARTIAL_LINK_TEXT, "Here")
                     here_link.click()
-                    time.sleep(self.settings.action_delay_seconds)
+                    time.sleep(1.0)
                 except Exception:
                     self.driver.delete_all_cookies()
                     self.driver.get("https://accounts.google.com/signin/v2/identifier?hl=en")
-                    time.sleep(self.settings.action_delay_seconds)
+                    time.sleep(1.0)
                 self._ensure_active_window()
                 page_src = self._page_source()
 
             # If on recovery page by accident, navigate back to identifier
             if "usernamerecovery" in self._current_url():
                 self.driver.get("https://accounts.google.com/signin/v2/identifier?hl=en")
-                time.sleep(self.settings.action_delay_seconds)
+                time.sleep(1.0)
                 self._ensure_active_window()
                 page_src = self._page_source()
 
@@ -206,14 +217,14 @@ class GoogleAuthVerifier:
                         By.XPATH, f"//*[contains(text(), '{account.email}')]"
                     )
                     acc_elem.click()
-                    time.sleep(self.settings.action_delay_seconds)
+                    time.sleep(0.8)
                 except Exception:
                     try:
                         use_another = self.driver.find_element(
                             By.XPATH, "//*[contains(text(), 'Use another account')]"
                         )
                         use_another.click()
-                        time.sleep(self.settings.action_delay_seconds)
+                        time.sleep(0.8)
                     except Exception:
                         pass
                 self._ensure_active_window()
@@ -229,18 +240,19 @@ class GoogleAuthVerifier:
                 email_input.clear()
                 for ch in account.email:
                     email_input.send_keys(ch)
-                    time.sleep(0.02)
-                time.sleep(0.3)
+                    time.sleep(random.uniform(0.02, 0.07))
+                time.sleep(random.uniform(0.2, 0.5))
 
                 # Submit via Enter key and fallback to exact #identifierNext button
                 email_input.send_keys(Keys.ENTER)
-                time.sleep(0.5)
+                time.sleep(0.3)
 
                 # If still on the same page, explicitly click the Next button container
                 if "identifier" in self.driver.current_url.lower() and "usernamerecovery" not in self.driver.current_url.lower():
+                    time.sleep(random.uniform(0.2, 0.5))
                     self._click_next("identifierNext")
 
-                time.sleep(self.settings.action_delay_seconds)
+                time.sleep(1.0)  # Wait for page transition after email submit
             except TimeoutException:
                 pass
 
@@ -363,16 +375,17 @@ class GoogleAuthVerifier:
             pass_input.clear()
             for ch in password:
                 pass_input.send_keys(ch)
-                time.sleep(0.02)
-            time.sleep(0.3)
+                time.sleep(random.uniform(0.02, 0.07))
+            time.sleep(random.uniform(0.2, 0.5))
 
             pass_input.send_keys(Keys.ENTER)
-            time.sleep(0.5)
+            time.sleep(0.3)
 
             if "challenge" not in self.driver.current_url.lower() and "myaccount" not in self.driver.current_url.lower():
+                time.sleep(random.uniform(0.2, 0.5))
                 self._click_next("passwordNext")
 
-            time.sleep(self.settings.action_delay_seconds * 2)
+            time.sleep(1.5)  # Wait for post-password page transition
             return True
         except Exception:
             return False
@@ -620,8 +633,8 @@ class GoogleAuthVerifier:
                 text = btn.text.strip().lower()
                 if text in ["continue", "allow", "i agree", "accept", "get started"]:
                     logger.info(f"Clicking consent/activation button: '{btn.text}'")
-                    btn.click()
-                    time.sleep(2)
+                    ActionChains(self.driver).move_to_element(btn).pause(random.uniform(0.1, 0.3)).click().perform()
+                    time.sleep(1.0)
                     break
         except Exception:
             pass
@@ -740,13 +753,13 @@ class GoogleAuthVerifier:
                         txt = btn.text.strip().lower()
                         if txt in ["sign in", "continue", "allow", "i agree", "accept", "get started"]:
                             logger.info(f"Clicking OAuth consent button: '{btn.text}'")
-                            self.driver.execute_script("arguments[0].click();", btn)
-                            time.sleep(3)
+                            ActionChains(self.driver).move_to_element(btn).pause(random.uniform(0.1, 0.3)).click().perform()
+                            time.sleep(1.5)
                             break
                 except Exception:
                     pass
 
-                time.sleep(1)
+                time.sleep(0.5)
 
             server_thread.join(timeout=5)
 
@@ -1040,11 +1053,11 @@ class GoogleAuthVerifier:
                 print(f"[*] Still waiting for phone verification completion... ({elapsed}/{wait_seconds}s)")
                 last_logged = elapsed
 
-            time.sleep(2)
+            time.sleep(1.0)
 
         print(f"\n[*] Re-evaluating Antigravity tiers for {account.email}...")
         self._call_onboard_user(access_token, account.email)
-        time.sleep(2)
+        time.sleep(1.0)
 
         res_data, status_code, err_msg = self._call_load_code_assist(access_token, account.email)
         if res_data:

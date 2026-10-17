@@ -38,7 +38,7 @@ BROWSER_HEADLESS=false
 
 # Wait timings (in seconds)
 PAGE_TIMEOUT_SECONDS=30
-ACTION_DELAY_SECONDS=2
+ACTION_DELAY_SECONDS=0.8
 
 # Persistent sessions to keep verified accounts logged in
 PERSISTENT_PROFILES=true

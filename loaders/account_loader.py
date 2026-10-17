@@ -1,6 +1,3 @@
-# File: account_loader.py
-# Created: 2026-09-12 11:56 PM
-# Last Modified: 2026-09-13 00:17 AM
 
 import re
 from pathlib import Path
@@ -13,6 +10,7 @@ from config.settings import get_settings
 class Account:
     email: str
     password: str
+    proxy: Optional[str] = None
     is_fallback_password: bool = False
     source_line: int = 0
 
@@ -30,7 +28,6 @@ class AccountLoader:
         self.file_path = file_path or self.settings.accounts_file
 
     def load_accounts(self, target_email: Optional[str] = None) -> List[Account]:
-        """Loads and parses accounts from accounts.txt with fallback password support."""
         if not self.file_path.exists():
             raise FileNotFoundError(f"Accounts file not found at: {self.file_path}")
 
@@ -40,11 +37,10 @@ class AccountLoader:
         with open(self.file_path, "r", encoding="utf-8") as f:
             for line_no, raw_line in enumerate(f, start=1):
                 line = raw_line.strip()
-                # Skip blank lines and comments
                 if not line or line.startswith("#"):
                     continue
 
-                email, password, is_fallback = self._parse_line(line)
+                email, password, is_fallback, proxy = self._parse_line(line, include_proxy=True)
                 if not email:
                     continue
 
@@ -55,6 +51,7 @@ class AccountLoader:
                     Account(
                         email=email,
                         password=password,
+                        proxy=proxy,
                         is_fallback_password=is_fallback,
                         source_line=line_no,
                     )
@@ -63,7 +60,6 @@ class AccountLoader:
         return accounts
 
     def remove_account(self, email: str) -> bool:
-        """Removes a successfully verified account from the accounts file."""
         if not self.file_path.exists():
             return False
 
@@ -76,7 +72,6 @@ class AccountLoader:
 
         for line in lines:
             stripped = line.strip()
-            # Preserve comments and empty lines
             if not stripped or stripped.startswith("#"):
                 new_lines.append(line)
                 continue
@@ -93,24 +88,23 @@ class AccountLoader:
 
         return removed
 
-    def _parse_line(self, line: str) -> tuple[Optional[str], str, bool]:
-        """
-        Parses a single line.
-        Supports:
-          - email:password
-          - email:
-          - email
-        """
+    def _parse_line(self, line: str, include_proxy: bool = False):
+        proxy = None
         if ":" in line:
-            parts = line.split(":", 1)
+            parts = line.split(":", 2)
             email = parts[0].strip()
             password = parts[1].strip()
+            if len(parts) > 2:
+                p_cand = parts[2].strip()
+                proxy = p_cand if p_cand else None
         else:
             email = line.strip()
             password = ""
+            proxy = None
 
-        # Basic email syntax check
         if not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", email):
+            if include_proxy:
+                return None, "", False, None
             return None, "", False
 
         is_fallback = False
@@ -118,4 +112,6 @@ class AccountLoader:
             password = self.settings.default_account_password
             is_fallback = True
 
+        if include_proxy:
+            return email, password, is_fallback, proxy
         return email, password, is_fallback

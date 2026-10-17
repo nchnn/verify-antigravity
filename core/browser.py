@@ -1,22 +1,16 @@
-# File: browser.py
-# Created: 2026-09-12 11:56 PM
-# Last Modified: 2026-09-12 11:56 PM
 
 import re
 import time
 import json
 import logging
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Union, Any
 import undetected_chromedriver as uc
 from selenium.webdriver.chrome.options import Options
 from config.settings import get_settings
 
 logger = logging.getLogger("AntigravityAuditor")
 
-# ── Patch undetected_chromedriver for Windows / Python 3.14 compatibility ──────
-# Prevents `OSError: [WinError 6] The handle is invalid` during driver.quit() / __del__()
-# and prevents undetected_chromedriver from attempting to rmtree persistent profiles.
 _original_uc_quit = uc.Chrome.quit
 
 
@@ -50,7 +44,6 @@ uc.Chrome.__del__ = _safe_uc_del
 
 
 class BrowserManager:
-    """Manages undetected-chromedriver lifecycle and profile environments."""
 
     def __init__(self, headless: Optional[bool] = None):
         self.settings = get_settings()
@@ -59,16 +52,13 @@ class BrowserManager:
         self.current_profile_path: Optional[Path] = None
 
     def get_profile_path(self, account_email: str) -> Optional[Path]:
-        """Generates a dedicated profile directory for the specific account."""
         if not self.settings.persistent_profiles:
             return None
 
-        # Sanitize email for folder name
         safe_name = re.sub(r"[^a-zA-Z0-9_.-]", "_", account_email.lower())
         profile_dir = self.settings.profiles_dir / safe_name
         profile_dir.mkdir(parents=True, exist_ok=True)
 
-        # Configure Chrome to preserve session cookies across browser restarts
         default_dir = profile_dir / "Default"
         default_dir.mkdir(parents=True, exist_ok=True)
         pref_file = default_dir / "Preferences"
@@ -80,6 +70,11 @@ class BrowserManager:
             if "session" not in prefs:
                 prefs["session"] = {}
             prefs["session"]["restore_on_startup"] = 1
+            if "profile" not in prefs:
+                prefs["profile"] = {}
+            if "default_content_setting_values" not in prefs["profile"]:
+                prefs["profile"]["default_content_setting_values"] = {}
+            prefs["profile"]["default_content_setting_values"]["cookies"] = 1
             with open(pref_file, "w", encoding="utf-8") as f:
                 json.dump(prefs, f)
         except Exception as e:
@@ -88,17 +83,15 @@ class BrowserManager:
         return profile_dir
 
     def _detect_chrome_version(self) -> Optional[int]:
-        """Detects the installed Chrome major version on Windows."""
         if self.settings.chrome_version_main:
             return self.settings.chrome_version_main
 
-        # Attempt to inspect Chrome executable version on Windows
         chrome_paths = [
             r"C:\Program Files\Google\Chrome\Application\chrome.exe",
             r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
             Path.home() / "AppData" / "Local" / "Google" / "Chrome" / "Application" / "chrome.exe",
         ]
-        
+
         for p in chrome_paths:
             path_obj = Path(p)
             if path_obj.exists():
@@ -119,16 +112,9 @@ class BrowserManager:
                 except Exception as e:
                     logger.debug(f"Error reading Chrome version: {e}")
 
-        # Default to 152 if detection fails
         return 152
 
     def _release_profile_lock(self, profile_path: Path):
-        """
-        Kills any existing Chrome processes that are holding a lock on the
-        given profile directory. Chrome locks the profile with a 'SingletonLock'
-        file — if a previous run crashed or wasn't closed cleanly, the next
-        launch will fail with 'cannot determine loading status'.
-        """
         try:
             import subprocess
             import psutil
@@ -147,7 +133,6 @@ class BrowserManager:
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
                     pass
 
-            # Also remove Chrome's SingletonLock / SingletonSocket files
             for lock_file in ["SingletonLock", "SingletonCookie", "SingletonSocket"]:
                 lock_path = profile_path / lock_file
                 if lock_path.exists():
@@ -161,32 +146,36 @@ class BrowserManager:
         except Exception as e:
             logger.debug(f"Profile lock release error: {e}")
 
-    def create_driver(self, account_email: Optional[str] = None) -> uc.Chrome:
-        """Initializes and returns an undetected Chrome WebDriver instance."""
+    def create_driver(self, account: Optional[Union[Any, str]] = None) -> uc.Chrome:
+        account_email = None
+        proxy = None
+        if isinstance(account, str):
+            account_email = account
+        elif account is not None:
+            account_email = getattr(account, "email", None)
+            proxy = getattr(account, "proxy", None)
+
         options = uc.ChromeOptions()
-        
         chrome_ver = self._detect_chrome_version()
-        user_agent = (
-            f"Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            f"AppleWebKit/537.36 (KHTML, like Gecko) "
-            f"Chrome/{chrome_ver}.0.0.0 Safari/537.36"
-        )
-        options.add_argument(f"--user-agent={user_agent}")
 
         if self.headless:
             options.add_argument("--headless=new")
-            options.add_argument("--disable-blink-features=AutomationControlled")
             options.add_argument("--window-size=1920,1080")
         else:
             options.add_argument("--window-size=1280,900")
 
-        # Essential stealth & performance arguments
+        options.add_argument("--enforce-webrtc-ip-permission-check")
+        options.add_argument("--force-webrtc-ip-handling-policy=default_public_interface_only")
+
+        if proxy:
+            options.add_argument(f"--proxy-server={proxy}")
+            logger.info(f"Configured proxy server: {proxy} for: {account_email or 'anonymous'}")
+
         options.add_argument("--no-sandbox")
         options.add_argument("--disable-dev-shm-usage")
         options.add_argument("--disable-notifications")
         options.add_argument("--disable-popup-blocking")
         options.add_argument("--lang=en-US")
-        # Suppress Chrome's 'Restore pages?' dialog after a crash
         options.add_argument("--no-first-run")
         options.add_argument("--no-default-browser-check")
         options.add_argument("--restore-last-session")
@@ -199,7 +188,7 @@ class BrowserManager:
                 self._release_profile_lock(profile_path)
 
         logger.info(f"Launching Chrome (v{chrome_ver}, headless={self.headless}) for: {account_email or 'anonymous'}")
-        
+
         try:
             self.driver = uc.Chrome(
                 options=options,
@@ -207,72 +196,16 @@ class BrowserManager:
                 version_main=chrome_ver,
                 use_subprocess=True,
             )
-            # Ensure persistent profile directories are never deleted by uc cleanup
             self.driver.keep_user_data_dir = True
             self.driver.set_page_load_timeout(self.settings.page_timeout_seconds)
             self.driver.implicitly_wait(10)
-
-            if self.headless:
-                self._apply_headless_evasions(user_agent, chrome_ver)
 
             return self.driver
         except Exception as e:
             logger.error(f"Failed to launch Chrome driver: {e}")
             raise
 
-    def _apply_headless_evasions(self, user_agent: str, chrome_ver: int):
-        """Overrides CDP User-Agent metadata, client hints, and screen dimensions to bypass headless detection."""
-        try:
-            self.driver.execute_cdp_cmd(
-                "Network.setUserAgentOverride",
-                {
-                    "userAgent": user_agent,
-                    "platform": "Win32",
-                    "acceptLanguage": "en-US,en;q=0.9",
-                    "userAgentMetadata": {
-                        "brands": [
-                            {"brand": "Chromium", "version": str(chrome_ver)},
-                            {"brand": "Google Chrome", "version": str(chrome_ver)},
-                            {"brand": "Not=A?Brand", "version": "24"},
-                        ],
-                        "fullVersionList": [
-                            {"brand": "Chromium", "version": f"{chrome_ver}.0.0.0"},
-                            {"brand": "Google Chrome", "version": f"{chrome_ver}.0.0.0"},
-                            {"brand": "Not=A?Brand", "version": "24.0.0.0"},
-                        ],
-                        "fullVersion": f"{chrome_ver}.0.0.0",
-                        "platform": "Windows",
-                        "platformVersion": "10.0.0",
-                        "architecture": "x86",
-                        "model": "",
-                        "mobile": False,
-                        "bitness": "64",
-                        "wow64": False,
-                    },
-                },
-            )
-            self.driver.execute_cdp_cmd(
-                "Page.addScriptToEvaluateOnNewDocument",
-                {
-                    "source": """
-                        Object.defineProperty(screen, 'width', { get: () => 1920 });
-                        Object.defineProperty(screen, 'height', { get: () => 1080 });
-                        Object.defineProperty(screen, 'availWidth', { get: () => 1920 });
-                        Object.defineProperty(screen, 'availHeight', { get: () => 1040 });
-                        Object.defineProperty(screen, 'colorDepth', { get: () => 24 });
-                        Object.defineProperty(screen, 'pixelDepth', { get: () => 24 });
-                    """
-                },
-            )
-        except Exception as e:
-            logger.debug(f"Headless evasions notice: {e}")
-
     def _wait_for_sqlite_flush(self, profile_path: Path, timeout: float = 12.0) -> bool:
-        """
-        Polls the profile's SQLite cookie database to ensure Chrome has flushed
-        its in-memory authentication cookies (SAPISID or SID) to disk before allowing
-        the driver process to close.
-        """
         from auth.profile_extractor import ProfileCookieExtractor
 
         start = time.time()
@@ -290,7 +223,6 @@ class BrowserManager:
                 pass
             time.sleep(0.3)
 
-        # Secondary check: verify if the SQLite cookies table has rows
         db = profile_path / "Default" / "Network" / "Cookies"
         if db.exists():
             try:
@@ -308,30 +240,21 @@ class BrowserManager:
         return False
 
     def flush_and_close(self, profile_path: Optional[Path] = None, timeout: float = 12.0) -> bool:
-        """
-        Ensures Chrome flushes all authentication cookies to the profile's SQLite
-        database on disk BEFORE closing or terminating the browser.
-        
-        Guarantees Chrome is NOT force-killed until the required cookies are in their profile.
-        """
         if not self.driver:
             return True
 
         target_profile = profile_path or self.current_profile_path
 
-        # 1. Instruct Chrome via CDP to close gracefully — triggers NetworkService SQLite commit
         try:
             self.driver.execute_cdp_cmd("Browser.close", {})
             logger.debug("[*] Sent graceful close signal via CDP; waiting for cookie flush to disk...")
         except Exception as e:
             logger.debug(f"Browser.close CDP signal notice: {e}")
 
-        # 2. Wait and verify that cookies have reached the SQLite database on disk
         flushed = False
         if target_profile:
             flushed = self._wait_for_sqlite_flush(target_profile, timeout=timeout)
 
-        # 3. Clean up Selenium driver & service
         try:
             time.sleep(0.8)
             self.driver.quit()
@@ -344,7 +267,6 @@ class BrowserManager:
         return flushed
 
     def close(self):
-        """Safely terminates the active Chrome driver instance, ensuring SQLite cache is flushed."""
         if self.driver:
             if self.current_profile_path:
                 self.flush_and_close(self.current_profile_path, timeout=5.0)
