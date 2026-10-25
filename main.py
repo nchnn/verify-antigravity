@@ -1,6 +1,9 @@
 import sys
 import time
 import argparse
+from colorama import init, Fore, Style
+
+init(autoreset=True)
 
 if sys.platform == "win32":
     try:
@@ -54,12 +57,17 @@ def parse_args():
 
 
 def display_account_list(accounts: list[Account]):
-    print(f"\nFound {len(accounts)} accounts:")
-    print("-" * 60)
+    print(f"\n{Fore.CYAN}Found {len(accounts)} accounts:{Style.RESET_ALL}")
+    print(Fore.CYAN + "-" * 60 + Style.RESET_ALL)
     for i, acc in enumerate(accounts, start=1):
         pw_type = "DEFAULT FALLBACK" if acc.is_fallback_password else "CUSTOM"
-        print(f"[{i:02d}] {acc.email:<35} | {pw_type:<16} | Pass: {acc.mask_password()}")
-    print("-" * 60 + "\n")
+        pw_color = Fore.YELLOW if acc.is_fallback_password else Fore.GREEN
+        print(
+            f"{Fore.WHITE}[{i:02d}] {Fore.CYAN}{acc.email:<35}{Style.RESET_ALL}"
+            f" | {pw_color}{pw_type:<16}{Style.RESET_ALL}"
+            f" | Pass: {acc.mask_password()}"
+        )
+    print(Fore.CYAN + "-" * 60 + Style.RESET_ALL + "\n")
 
 
 def main():
@@ -74,30 +82,30 @@ def main():
     try:
         accounts = loader.load_accounts(target_email=args.account)
     except Exception as e:
-        print(f"Error loading accounts: {e}")
+        print(f"{Fore.RED}{Style.BRIGHT}Error loading accounts: {e}{Style.RESET_ALL}")
         sys.exit(1)
 
     if not accounts:
-        print("No matching accounts found to process.")
+        print(f"{Fore.YELLOW}No matching accounts found to process.{Style.RESET_ALL}")
         sys.exit(0)
 
     if args.list:
         display_account_list(accounts)
         sys.exit(0)
 
-    print("\n" + "=" * 60)
-    print("STARTING ANTIGRAVITY ACCOUNT VERIFICATION")
-    print(f"Target count: {len(accounts)}")
-    print(f"Headless mode: {args.headless or settings.browser_headless}")
-    print(f"Extract tokens/cookies: {extract_enabled}")
-    print("=" * 60 + "\n")
+    print("\n" + Fore.CYAN + Style.BRIGHT + "=" * 60 + Style.RESET_ALL)
+    print(Fore.CYAN + Style.BRIGHT + "STARTING ANTIGRAVITY ACCOUNT VERIFICATION" + Style.RESET_ALL)
+    print(f"{Fore.WHITE}Target count: {Fore.YELLOW}{len(accounts)}{Style.RESET_ALL}")
+    print(f"{Fore.WHITE}Headless mode: {Fore.YELLOW}{args.headless or settings.browser_headless}{Style.RESET_ALL}")
+    print(f"{Fore.WHITE}Extract tokens/cookies: {Fore.YELLOW}{extract_enabled}{Style.RESET_ALL}")
+    print(Fore.CYAN + Style.BRIGHT + "=" * 60 + Style.RESET_ALL + "\n")
 
     browser_manager = BrowserManager(headless=args.headless or settings.browser_headless)
     skipped_credentials: list[str] = []
 
     try:
         for index, acc in enumerate(accounts, start=1):
-            print(f"\n>>> Processing [{index}/{len(accounts)}]: {acc.email}")
+            print(f"\n{Fore.CYAN}{Style.BRIGHT}>>> Processing [{index}/{len(accounts)}]: {acc.email}{Style.RESET_ALL}")
             process_account(
                 account=acc,
                 browser_manager=browser_manager,
@@ -109,21 +117,21 @@ def main():
             )
             time.sleep(0.5)
     except KeyboardInterrupt:
-        print("\nVerification process interrupted by user.")
+        print(f"\n{Fore.YELLOW}{Style.BRIGHT}Verification process interrupted by user.{Style.RESET_ALL}")
     finally:
         auditor.export_reports()
         auditor.print_summary()
 
         if skipped_credentials:
-            sep = "=" * 60
+            sep = Fore.RED + Style.BRIGHT + "=" * 60 + Style.RESET_ALL
             print(f"\n{sep}")
-            print(f"\u26a0\ufe0f  SKIPPED ACCOUNTS \u2014 INVALID CREDENTIALS ({len(skipped_credentials)})")
+            print(f"{Fore.RED}{Style.BRIGHT}⚠️  SKIPPED ACCOUNTS — INVALID CREDENTIALS ({len(skipped_credentials)}){Style.RESET_ALL}")
             print(f"{sep}")
-            print("The following accounts were skipped due to incorrect password")
+            print(f"{Fore.YELLOW}The following accounts were skipped due to incorrect password")
             print("or unrecognized email. They remain in accounts.txt so you can")
-            print("fix the password and re-run.\n")
+            print(f"fix the password and re-run.{Style.RESET_ALL}\n")
             for i, email in enumerate(skipped_credentials, start=1):
-                print(f"  [{i:02d}] {email}")
+                print(f"  {Fore.YELLOW}[{i:02d}] {email}{Style.RESET_ALL}")
             print(f"\n{sep}\n")
 
 

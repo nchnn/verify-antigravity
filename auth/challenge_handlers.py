@@ -7,8 +7,131 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import TimeoutException
 
 logger = logging.getLogger("AntigravityAuditor")
+
+
+_ACCOUNT_NOT_FOUND_PHRASES = [
+    "couldn't find your google account",
+    "enter a valid email",
+    "find your google account",
+    "no account found",
+    "account doesn't exist",
+]
+
+_WRONG_PASSWORD_PHRASES = [
+    "your password was changed",
+    "wrong password",
+    "incorrect password",
+    "wrong password. try again",
+]
+
+_TWO_FA_PHRASES = [
+    "2-step verification",
+    "verify it's you",
+    "check your phone",
+    "enter the code",
+    "confirm your recovery phone",
+    "verify your info to continue",
+    "scan the qr code",
+]
+
+
+def wait_for_transition(driver, timeout: float = 8.0, poll: float = 0.3) -> str:
+    """
+    Wait up to `timeout` seconds (polling every `poll` seconds) for Google's
+    page to transition after a form submit. Returns a string token as soon as
+    any outcome is detected, or "timeout" if nothing fires within `timeout`.
+
+    Tokens:
+        "not_found"    — account does not exist
+        "rejected"     — security block (headless/automation detected)
+        "bot"          — reCAPTCHA / robot challenge
+        "qr"           — QR code verification challenge
+        "2fa"          — 2-step / phone / recovery challenge
+        "wrong_pass"   — wrong password error
+        "authed"       — already authenticated (myaccount / gds session)
+        "password"     — password input field appeared (email step succeeded)
+        "timeout"      — none of the above within `timeout` seconds
+    """
+    try:
+        driver.implicitly_wait(0)
+    except Exception:
+        pass
+
+    def _condition(d):
+        try:
+            src = (d.page_source or "").lower()
+            url = (d.current_url or "").lower()
+
+            if any(p in src for p in _ACCOUNT_NOT_FOUND_PHRASES):
+                return "not_found"
+
+            if any(p in src for p in _WRONG_PASSWORD_PHRASES):
+                return "wrong_pass"
+
+            # Security rejection
+            if (
+                "signin/rejected" in url
+                or "/rejected" in url
+                or any(p in src for p in [
+                    "this browser or app may not be secure",
+                    "couldn't sign you in",
+                    "try using a different browser",
+                ])
+            ):
+                # Could still be "account not found" disguised as rejection
+                if any(p in src for p in _ACCOUNT_NOT_FOUND_PHRASES):
+                    return "not_found"
+                return "rejected"
+
+            if "myaccount.google.com" in url or "gds.google.com" in url:
+                return "authed"
+
+            # Bot challenge
+            if "challenge/recaptcha" in url or "/recaptcha" in url:
+                return "bot"
+            if any(p in src for p in ["confirm you're not a robot", "not a robot"]):
+                return "bot"
+            try:
+                if d.find_elements(By.CSS_SELECTOR, "iframe[src*='recaptcha'], #recaptcha, .g-recaptcha"):
+                    return "bot"
+            except Exception:
+                pass
+
+            # QR challenge
+            if "challenge/iap/qrcode" in url:
+                return "qr"
+            if any(p in src for p in ["scan the qr code with your phone", "scan the qr code"]):
+                return "qr"
+
+            # 2FA / phone challenge (exclude "scan the qr code" — already caught above)
+            if any(p in src for p in _TWO_FA_PHRASES):
+                return "2fa"
+
+            # Password field appeared (email step done)
+            try:
+                d.find_element(By.CSS_SELECTOR, "input[type='password'], input[name='Passwd']")
+                return "password"
+            except Exception:
+                pass
+
+        except Exception:
+            pass
+        return False  # keep waiting
+
+    try:
+        result = WebDriverWait(driver, timeout, poll_frequency=poll).until(_condition)
+    except TimeoutException:
+        result = "timeout"
+    finally:
+        try:
+            driver.implicitly_wait(10)
+        except Exception:
+            pass
+
+    return result
 
 
 def ensure_active_window(driver) -> bool:

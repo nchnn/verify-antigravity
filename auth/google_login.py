@@ -22,6 +22,7 @@ from auth.challenge_handlers import (
     wait_for_bot_challenge_resolution,
     wait_for_qr_challenge_resolution,
     wait_for_challenge_resolution,
+    wait_for_transition,
 )
 
 logger = logging.getLogger("AntigravityAuditor")
@@ -67,7 +68,6 @@ def enter_password(driver, password: str) -> bool:
             time.sleep(random.uniform(0.2, 0.5))
             click_next(driver, "passwordNext")
 
-        time.sleep(1.5)
         return True
     except Exception:
         return False
@@ -145,18 +145,23 @@ def perform_google_login(driver, account: Account, settings) -> Tuple[Verificati
 
         ensure_active_window(driver)
 
-        current_src = driver.page_source.lower()
-        if "couldn't find your google account" in current_src or "enter a valid email" in current_src:
+        # --- Wait for Google to transition after email submit ---
+        outcome = wait_for_transition(driver, timeout=8.0, poll=0.3)
+
+        if outcome == "not_found":
             return VerificationStatus.INVALID_CREDENTIALS, "Google account not found", {}
 
-        if is_security_rejection_present(driver):
+        if outcome == "rejected":
             return (
                 VerificationStatus.ERROR,
                 "Google blocked sign-in ('This browser or app may not be secure' - headless/automation detected)",
                 {},
             )
 
-        if is_bot_challenge_present(driver):
+        if outcome == "authed":
+            return VerificationStatus.SUCCESS_VERIFIED, "Session already active", {}
+
+        if outcome == "bot":
             resolved = wait_for_bot_challenge_resolution(driver, account.email, settings)
             if not resolved:
                 return (
@@ -164,49 +169,9 @@ def perform_google_login(driver, account: Account, settings) -> Tuple[Verificati
                     "Robot verification challenge ('Confirm you're not a robot') timed out",
                     {},
                 )
+            # challenge resolved — fall through to password
 
-        password_entered = enter_password(driver, account.password)
-        if not password_entered:
-            ensure_active_window(driver)
-            if is_security_rejection_present(driver):
-                return (
-                    VerificationStatus.ERROR,
-                    "Google blocked sign-in ('This browser or app may not be secure' - headless/automation detected)",
-                    {},
-                )
-            if is_bot_challenge_present(driver):
-                resolved = wait_for_bot_challenge_resolution(driver, account.email, settings)
-                if resolved:
-                    password_entered = enter_password(driver, account.password)
-                    if not password_entered:
-                        if "myaccount.google.com" in driver.current_url or "gds.google.com" in driver.current_url:
-                            return VerificationStatus.SUCCESS_VERIFIED, "Session already active", {}
-                        return VerificationStatus.ERROR, "Password input field not encountered after robot challenge", {}
-                else:
-                    return (
-                        VerificationStatus.CHALLENGE_REQUIRED,
-                        "Robot verification challenge ('Confirm you're not a robot') timed out",
-                        {},
-                    )
-            elif "myaccount.google.com" in driver.current_url or "gds.google.com" in driver.current_url:
-                return VerificationStatus.SUCCESS_VERIFIED, "Session already active", {}
-            else:
-                return VerificationStatus.ERROR, "Password input field not encountered", {}
-
-        ensure_active_window(driver)
-        current_src = driver.page_source.lower()
-        if "wrong password" in current_src or "incorrect password" in current_src:
-            return VerificationStatus.INVALID_CREDENTIALS, "Incorrect password provided", {}
-
-        if is_bot_challenge_present(driver):
-            resolved = wait_for_bot_challenge_resolution(driver, account.email, settings)
-            if not resolved:
-                return (
-                    VerificationStatus.CHALLENGE_REQUIRED,
-                    "Robot verification challenge ('Confirm you're not a robot') timed out",
-                )
-
-        if is_qr_challenge_present(driver):
+        elif outcome == "qr":
             resolved = wait_for_qr_challenge_resolution(driver, account.email, settings)
             if not resolved:
                 return (
@@ -215,26 +180,101 @@ def perform_google_login(driver, account: Account, settings) -> Tuple[Verificati
                     {},
                 )
 
-        current_src = driver.page_source.lower()
-        if any(
-            term in current_src
-            for term in [
-                "2-step verification",
-                "verify it's you",
-                "challenge",
-                "check your phone",
-                "enter the code",
-                "confirm your recovery phone",
-                "verify your info to continue",
-                "scan the qr code",
-            ]
-        ):
+        elif outcome == "2fa":
             logger.warning(
                 f"2FA/Phone prompt detected for {account.email}. Waiting up to {settings.challenge_timeout_seconds}s for resolution..."
             )
             resolved = wait_for_challenge_resolution(driver, timeout=settings.challenge_timeout_seconds)
             if not resolved:
                 return VerificationStatus.CHALLENGE_REQUIRED, "Security verification or 2FA required", {}
+
+        elif outcome == "timeout":
+            cur_url = current_url(driver)
+            logger.info(
+                f"No password field after email submit for {account.email}. "
+                f"URL: {cur_url[:120]}"
+            )
+            return VerificationStatus.INVALID_CREDENTIALS, "Google account not found", {}
+
+        # outcome == "password" — fall through to enter password
+
+        password_entered = enter_password(driver, account.password)
+        ensure_active_window(driver)
+
+        # --- Wait for Google to transition after password submit ---
+        post_outcome = wait_for_transition(driver, timeout=8.0, poll=0.3)
+
+        if post_outcome == "wrong_pass":
+            return VerificationStatus.INVALID_CREDENTIALS, "Incorrect password provided", {}
+
+        if post_outcome == "not_found":
+            return VerificationStatus.INVALID_CREDENTIALS, "Google account not found", {}
+
+        if post_outcome == "authed":
+            return VerificationStatus.SUCCESS_VERIFIED, "Google authentication successful", {}
+
+        if post_outcome == "password":
+            # Password field still visible — could be a brief DOM transition or a real rejection.
+            # Distinguish by URL: if still on identifier page, Google rejected credentials.
+            # If URL moved away, the field is a DOM remnant during animation — treat as success.
+            cur_url = current_url(driver)
+            if "accounts.google.com/v3/signin/identifier" in cur_url or "accounts.google.com/signin/v2/identifier" in cur_url:
+                return VerificationStatus.INVALID_CREDENTIALS, "Incorrect password or account not found", {}
+
+        if post_outcome == "bot":
+            resolved = wait_for_bot_challenge_resolution(driver, account.email, settings)
+            if not resolved:
+                return (
+                    VerificationStatus.CHALLENGE_REQUIRED,
+                    "Robot verification challenge ('Confirm you're not a robot') timed out",
+                    {},
+                )
+            # resolved — fall through to success
+
+        elif post_outcome == "qr":
+            resolved = wait_for_qr_challenge_resolution(driver, account.email, settings)
+            if not resolved:
+                return (
+                    VerificationStatus.CHALLENGE_REQUIRED,
+                    "QR code verification challenge timed out — please scan the QR code on your phone and retry",
+                    {},
+                )
+
+        elif post_outcome == "2fa":
+            logger.warning(
+                f"2FA/Phone prompt detected for {account.email}. Waiting up to {settings.challenge_timeout_seconds}s for resolution..."
+            )
+            resolved = wait_for_challenge_resolution(driver, timeout=settings.challenge_timeout_seconds)
+            if not resolved:
+                return VerificationStatus.CHALLENGE_REQUIRED, "Security verification or 2FA required", {}
+
+        elif post_outcome == "rejected":
+            return (
+                VerificationStatus.ERROR,
+                "Google blocked sign-in ('This browser or app may not be secure' - headless/automation detected)",
+                {},
+            )
+
+        elif post_outcome == "timeout":
+            if not password_entered:
+                return VerificationStatus.INVALID_CREDENTIALS, "Google account not found", {}
+            # Password was entered but page didn't resolve cleanly within 8s.
+            # Do a final explicit check before assuming success.
+            ensure_active_window(driver)
+            final_src = (driver.page_source or "").lower()
+            final_url = current_url(driver)
+            if any(p in final_src for p in ["wrong password", "incorrect password", "wrong password. try again"]):
+                return VerificationStatus.INVALID_CREDENTIALS, "Incorrect password provided", {}
+            if any(p in final_src for p in [
+                "couldn't find your google account", "enter a valid email",
+                "find your google account", "no account found", "account doesn't exist",
+            ]):
+                return VerificationStatus.INVALID_CREDENTIALS, "Google account not found", {}
+            if "myaccount.google.com" not in final_url and "gds.google.com" not in final_url:
+                logger.info(
+                    f"No clear post-password outcome for {account.email}. URL: {final_url[:120]}"
+                )
+                return VerificationStatus.INVALID_CREDENTIALS, "Google account not found", {}
 
         return VerificationStatus.SUCCESS_VERIFIED, "Google authentication successful", {}
 

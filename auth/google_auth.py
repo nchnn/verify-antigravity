@@ -52,8 +52,7 @@ class GoogleAuthVerifier:
 
             if (
                 "myaccount.google.com" in cur_url
-                or "choose an account" in page_src
-                or "select an account" in page_src
+                or (account.email.lower() in page_src and ("choose an account" in page_src or "select an account" in page_src))
                 or ("accounts.google.com" in cur_url and account.email.lower() in page_src)
             ):
                 logger.info(f"Active Google session detected via page state for: {account.email}")
